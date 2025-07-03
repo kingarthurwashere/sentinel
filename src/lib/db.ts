@@ -1,6 +1,9 @@
-import { neon } from "@neondatabase/serverless"
+import { Pool } from "pg"
 
-const sql = neon(process.env.DATABASE_URL!)
+const sql = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: process.env.NODE_ENV === "production" ? { rejectUnauthorized: false } : false,
+})
 
 export interface Field {
   id: number

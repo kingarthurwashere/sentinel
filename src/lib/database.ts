@@ -1,18 +1,22 @@
-import { neon } from "@neondatabase/serverless"
+import { Pool } from "pg"
 
-// Initialize database connection with safety check
-let sql: any = null
+// Create PostgreSQL connection pool
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: process.env.NODE_ENV === "production" ? { rejectUnauthorized: false } : false,
+  max: 20,
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 2000,
+})
 
-function initializeDatabase() {
-  if (!sql && process.env.DATABASE_URL && process.env.DATABASE_URL !== "placeholder") {
-    try {
-      sql = neon(process.env.DATABASE_URL)
-    } catch (error) {
-      console.warn("Database connection failed:", error)
-      sql = null
-    }
-  }
-}
+// Test connection on startup
+pool.on("connect", () => {
+  console.log("Connected to PostgreSQL database")
+})
+
+pool.on("error", (err) => {
+  console.error("Unexpected error on idle client", err)
+})
 
 // Mock data for when database is not available
 const mockFields = [
@@ -58,27 +62,6 @@ const mockFields = [
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
   },
-  {
-    id: 3,
-    name: "East Soybean Research Plot",
-    description: "Experimental soybean cultivation area for testing new varieties",
-    coordinates: {
-      type: "Polygon",
-      coordinates: [
-        [
-          [13.47, 46.04],
-          [13.49, 46.04],
-          [13.49, 46.06],
-          [13.47, 46.06],
-          [13.47, 46.04],
-        ],
-      ],
-    },
-    area_hectares: 28.5,
-    crop_type: "Soybean",
-    created_at: new Date().toISOString(),
-    updated_at: new Date().toISOString(),
-  },
 ]
 
 const mockAnalyses = [
@@ -92,21 +75,6 @@ const mockAnalyses = [
     savi_value: 0.72,
     stress_level: "Good",
     health_score: 78,
-    true_color_image_url: "/placeholder.svg?height=400&width=400",
-    ndvi_image_url: "/placeholder.svg?height=400&width=400",
-    analysis_metadata: { data_source: "Sentinel-2", processing_level: "L2A" },
-    created_at: new Date().toISOString(),
-  },
-  {
-    id: 2,
-    field_id: 2,
-    analysis_date: new Date(Date.now() - 5 * 24 * 60 * 60 * 1000).toISOString().split("T")[0],
-    ndvi_value: 0.68,
-    evi_value: 0.61,
-    ndwi_value: 0.12,
-    savi_value: 0.65,
-    stress_level: "Fair",
-    health_score: 68,
     true_color_image_url: "/placeholder.svg?height=400&width=400",
     ndvi_image_url: "/placeholder.svg?height=400&width=400",
     analysis_metadata: { data_source: "Sentinel-2", processing_level: "L2A" },
@@ -152,17 +120,26 @@ export interface AnalysisHistory {
   acquisition_date: string
 }
 
+// Database helper function
+async function query(text: string, params?: any[]): Promise<any> {
+  try {
+    const client = await pool.connect()
+    try {
+      const result = await client.query(text, params)
+      return result.rows
+    } finally {
+      client.release()
+    }
+  } catch (error) {
+    console.warn("Database query failed:", error)
+    throw error
+  }
+}
+
 // Field operations
 export async function getAllFields(): Promise<Field[]> {
-  initializeDatabase()
-
-  if (!sql) {
-    console.log("Using mock data for fields")
-    return mockFields as Field[]
-  }
-
   try {
-    const result = await sql`SELECT * FROM fields ORDER BY created_at DESC`
+    const result = await query("SELECT * FROM fields ORDER BY created_at DESC")
     return result as Field[]
   } catch (error) {
     console.warn("Database query failed, using mock data:", error)
@@ -171,16 +148,9 @@ export async function getAllFields(): Promise<Field[]> {
 }
 
 export async function getFieldById(id: number): Promise<Field | null> {
-  initializeDatabase()
-
-  if (!sql) {
-    const field = mockFields.find((f) => f.id === id)
-    return (field as Field) || null
-  }
-
   try {
-    const result = await sql`SELECT * FROM fields WHERE id = ${id}`
-    return (result[0] as Field) || null
+    const result = await query("SELECT * FROM fields WHERE id = $1", [id])
+    return result[0] || null
   } catch (error) {
     console.warn("Database query failed, using mock data:", error)
     const field = mockFields.find((f) => f.id === id)
@@ -195,29 +165,19 @@ export async function createField(data: {
   area_hectares?: number
   crop_type?: string
 }): Promise<Field> {
-  initializeDatabase()
-
-  if (!sql) {
-    const newField = {
-      id: Math.max(...mockFields.map((f) => f.id)) + 1,
-      name: data.name,
-      description: data.description || null,
-      coordinates: data.coordinates,
-      area_hectares: data.area_hectares || null,
-      crop_type: data.crop_type || null,
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
-    }
-    mockFields.push(newField)
-    return newField as Field
-  }
-
   try {
-    const result = await sql`
-      INSERT INTO fields (name, description, coordinates, area_hectares, crop_type)
-      VALUES (${data.name}, ${data.description || null}, ${JSON.stringify(data.coordinates)}, ${data.area_hectares || null}, ${data.crop_type || null})
-      RETURNING *
-    `
+    const result = await query(
+      `INSERT INTO fields (name, description, coordinates, area_hectares, crop_type)
+       VALUES ($1, $2, $3, $4, $5)
+       RETURNING *`,
+      [
+        data.name,
+        data.description || null,
+        JSON.stringify(data.coordinates),
+        data.area_hectares || null,
+        data.crop_type || null,
+      ],
+    )
     return result[0] as Field
   } catch (error) {
     console.warn("Database insert failed, using mock data:", error)
@@ -236,19 +196,29 @@ export async function createField(data: {
   }
 }
 
-export async function deleteField(id: number): Promise<void> {
-  initializeDatabase()
-
-  if (!sql) {
-    const index = mockFields.findIndex((f) => f.id === id)
-    if (index > -1) {
-      mockFields.splice(index, 1)
-    }
-    return
-  }
-
+export async function updateField(id: number, data: Partial<Field>): Promise<Field | null> {
   try {
-    await sql`DELETE FROM fields WHERE id = ${id}`
+    const setClause = Object.keys(data)
+      .filter((key) => key !== "id" && data[key as keyof Field] !== undefined)
+      .map((key, index) => `${key} = $${index + 2}`)
+      .join(", ")
+
+    const values = Object.values(data).filter((value) => value !== undefined)
+
+    const result = await query(
+      `UPDATE fields SET ${setClause}, updated_at = CURRENT_TIMESTAMP WHERE id = $1 RETURNING *`,
+      [id, ...values],
+    )
+    return result[0] || null
+  } catch (error) {
+    console.warn("Database update failed:", error)
+    return null
+  }
+}
+
+export async function deleteField(id: number): Promise<void> {
+  try {
+    await query("DELETE FROM fields WHERE id = $1", [id])
   } catch (error) {
     console.warn("Database delete failed:", error)
     const index = mockFields.findIndex((f) => f.id === id)
@@ -260,18 +230,10 @@ export async function deleteField(id: number): Promise<void> {
 
 // Vegetation analysis operations
 export async function getVegetationAnalysisByField(fieldId: number): Promise<VegetationAnalysis[]> {
-  initializeDatabase()
-
-  if (!sql) {
-    return mockAnalyses.filter((a) => a.field_id === fieldId) as VegetationAnalysis[]
-  }
-
   try {
-    const result = await sql`
-      SELECT * FROM vegetation_analysis 
-      WHERE field_id = ${fieldId} 
-      ORDER BY analysis_date DESC
-    `
+    const result = await query("SELECT * FROM vegetation_analysis WHERE field_id = $1 ORDER BY analysis_date DESC", [
+      fieldId,
+    ])
     return result as VegetationAnalysis[]
   } catch (error) {
     console.warn("Database query failed, using mock data:", error)
@@ -292,42 +254,26 @@ export async function saveVegetationAnalysis(data: {
   ndvi_image_url?: string
   analysis_metadata?: any
 }): Promise<VegetationAnalysis> {
-  initializeDatabase()
-
-  if (!sql) {
-    const newAnalysis = {
-      id: Math.max(...mockAnalyses.map((a) => a.id)) + 1,
-      field_id: data.field_id,
-      analysis_date: data.analysis_date,
-      ndvi_value: data.ndvi_value || null,
-      evi_value: data.evi_value || null,
-      ndwi_value: data.ndwi_value || null,
-      savi_value: data.savi_value || null,
-      stress_level: data.stress_level || null,
-      health_score: data.health_score || null,
-      true_color_image_url: data.true_color_image_url || null,
-      ndvi_image_url: data.ndvi_image_url || null,
-      analysis_metadata: data.analysis_metadata || {},
-      created_at: new Date().toISOString(),
-    }
-    mockAnalyses.push(newAnalysis)
-    return newAnalysis as VegetationAnalysis
-  }
-
   try {
-    const result = await sql`
-      INSERT INTO vegetation_analysis (
+    const result = await query(
+      `INSERT INTO vegetation_analysis (
         field_id, analysis_date, ndvi_value, evi_value, ndwi_value, savi_value,
         stress_level, health_score, true_color_image_url, ndvi_image_url, analysis_metadata
-      )
-      VALUES (
-        ${data.field_id}, ${data.analysis_date}, ${data.ndvi_value || null}, ${data.evi_value || null},
-        ${data.ndwi_value || null}, ${data.savi_value || null}, ${data.stress_level || null},
-        ${data.health_score || null}, ${data.true_color_image_url || null}, ${data.ndvi_image_url || null},
-        ${JSON.stringify(data.analysis_metadata || {})}
-      )
-      RETURNING *
-    `
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING *`,
+      [
+        data.field_id,
+        data.analysis_date,
+        data.ndvi_value || null,
+        data.evi_value || null,
+        data.ndwi_value || null,
+        data.savi_value || null,
+        data.stress_level || null,
+        data.health_score || null,
+        data.true_color_image_url || null,
+        data.ndvi_image_url || null,
+        JSON.stringify(data.analysis_metadata || {}),
+      ],
+    )
     return result[0] as VegetationAnalysis
   } catch (error) {
     console.warn("Database insert failed, using mock data:", error)
@@ -357,8 +303,6 @@ export async function createAnalysisHistory(data: {
   bbox: any
   acquisition_date: string
 }): Promise<AnalysisHistory> {
-  initializeDatabase()
-
   const mockHistory = {
     id: Date.now(),
     field_id: data.field_id,
@@ -370,16 +314,11 @@ export async function createAnalysisHistory(data: {
     acquisition_date: data.acquisition_date,
   }
 
-  if (!sql) {
-    return mockHistory as AnalysisHistory
-  }
-
   try {
-    const result = await sql`
-      INSERT INTO analysis_history (field_id, bbox, acquisition_date)
-      VALUES (${data.field_id}, ${JSON.stringify(data.bbox)}, ${data.acquisition_date})
-      RETURNING *
-    `
+    const result = await query(
+      "INSERT INTO analysis_history (field_id, bbox, acquisition_date) VALUES ($1, $2, $3) RETURNING *",
+      [data.field_id, JSON.stringify(data.bbox), data.acquisition_date],
+    )
     return result[0] as AnalysisHistory
   } catch (error) {
     console.warn("Database insert failed, using mock data:", error)
@@ -395,44 +334,120 @@ export async function updateAnalysisHistory(
     error_message?: string
   },
 ): Promise<void> {
-  initializeDatabase()
-
-  if (!sql) {
-    console.log("Mock: Updated analysis history", id, data)
-    return
-  }
-
   try {
-    await sql`
-      UPDATE analysis_history 
-      SET 
-        processing_status = ${data.processing_status || "pending"},
-        processing_completed_at = ${data.processing_completed_at || null},
-        error_message = ${data.error_message || null}
-      WHERE id = ${id}
-    `
+    await query(
+      `UPDATE analysis_history 
+       SET processing_status = $2, processing_completed_at = $3, error_message = $4
+       WHERE id = $1`,
+      [id, data.processing_status || "pending", data.processing_completed_at || null, data.error_message || null],
+    )
   } catch (error) {
     console.warn("Database update failed:", error)
   }
 }
 
-export async function getRecentAnalysisHistory(fieldId: number): Promise<AnalysisHistory[]> {
-  initializeDatabase()
-
-  if (!sql) {
-    return []
-  }
-
+// Dashboard and statistics
+export async function getDashboardStats(): Promise<{
+  total_fields: number
+  total_analyses: number
+  recent_analyses: number
+  avg_health_score: number
+  active_fields: number
+}> {
   try {
-    const result = await sql`
-      SELECT * FROM analysis_history 
-      WHERE field_id = ${fieldId} 
-      ORDER BY processing_started_at DESC 
-      LIMIT 10
-    `
-    return result as AnalysisHistory[]
+    const result = await query(`
+      SELECT 
+        (SELECT COUNT(*) FROM fields) as total_fields,
+        (SELECT COUNT(*) FROM vegetation_analysis) as total_analyses,
+        (SELECT COUNT(*) FROM vegetation_analysis WHERE analysis_date >= CURRENT_DATE - INTERVAL '30 days') as recent_analyses,
+        (SELECT AVG(health_score) FROM vegetation_analysis WHERE analysis_date >= CURRENT_DATE - INTERVAL '30 days') as avg_health_score,
+        (SELECT COUNT(DISTINCT field_id) FROM vegetation_analysis WHERE analysis_date >= CURRENT_DATE - INTERVAL '7 days') as active_fields
+    `)
+    return result[0]
   } catch (error) {
-    console.warn("Database query failed:", error)
-    return []
+    console.warn("Database query failed, using mock stats:", error)
+    return {
+      total_fields: mockFields.length,
+      total_analyses: mockAnalyses.length,
+      recent_analyses: mockAnalyses.length,
+      avg_health_score: 75,
+      active_fields: mockFields.length,
+    }
   }
 }
+
+export async function getFieldsWithAnalytics(): Promise<any[]> {
+  try {
+    const result = await query(`
+      SELECT 
+        f.*,
+        COUNT(va.id) as analysis_count,
+        MAX(va.analysis_date) as last_analysis_date,
+        AVG(va.health_score) as avg_health_score,
+        AVG(va.ndvi_value) as avg_ndvi
+      FROM fields f
+      LEFT JOIN vegetation_analysis va ON f.id = va.field_id
+      GROUP BY f.id, f.name, f.description, f.coordinates, f.area_hectares, f.crop_type, f.created_at, f.updated_at
+      ORDER BY f.created_at DESC
+    `)
+    return result
+  } catch (error) {
+    console.warn("Database query failed, using mock data:", error)
+    return mockFields.map((field) => ({
+      ...field,
+      analysis_count: mockAnalyses.filter((a) => a.field_id === field.id).length,
+      last_analysis_date: mockAnalyses.find((a) => a.field_id === field.id)?.analysis_date || null,
+      avg_health_score: 75,
+      avg_ndvi: 0.7,
+    }))
+  }
+}
+
+export async function searchFields(searchTerm: string): Promise<Field[]> {
+  try {
+    const result = await query(
+      `SELECT * FROM fields 
+       WHERE name ILIKE $1 OR description ILIKE $1 OR crop_type ILIKE $1
+       ORDER BY created_at DESC`,
+      [`%${searchTerm}%`],
+    )
+    return result as Field[]
+  } catch (error) {
+    console.warn("Database search failed, using mock data:", error)
+    return mockFields.filter(
+      (field) =>
+        field.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
+        field.description?.toLowerCase().includes(searchTerm.toLowerCase()) ||
+        field.crop_type?.toLowerCase().includes(searchTerm.toLowerCase()),
+    ) as Field[]
+  }
+}
+
+// Health check
+export async function healthCheck(): Promise<{ status: string; fields_count: number; analyses_count: number }> {
+  try {
+    const result = await query(`
+      SELECT 
+        'healthy' as status,
+        (SELECT COUNT(*) FROM fields) as fields_count,
+        (SELECT COUNT(*) FROM vegetation_analysis) as analyses_count
+    `)
+    return result[0]
+  } catch (error) {
+    console.warn("Database health check failed:", error)
+    return {
+      status: "unhealthy",
+      fields_count: mockFields.length,
+      analyses_count: mockAnalyses.length,
+    }
+  }
+}
+
+// Close pool on app termination
+process.on("SIGINT", () => {
+  pool.end()
+})
+
+process.on("SIGTERM", () => {
+  pool.end()
+})

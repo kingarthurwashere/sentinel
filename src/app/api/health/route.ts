@@ -1,33 +1,48 @@
 import { NextResponse } from "next/server"
-import { neon } from "@neondatabase/serverless"
+import { Pool } from "pg"
+
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: process.env.NODE_ENV === "production" ? { rejectUnauthorized: false } : false,
+})
 
 export async function GET() {
   try {
     // Check database connection
-    const sql = neon(process.env.DATABASE_URL!)
-    const result = await sql`SELECT health_check()`
+    const client = await pool.connect()
 
-    const healthData = result[0]
+    try {
+      const result = await client.query(`
+        SELECT 
+          'healthy' as status,
+          (SELECT COUNT(*) FROM fields) as fields_count,
+          (SELECT COUNT(*) FROM vegetation_analysis) as analyses_count
+      `)
 
-    return NextResponse.json({
-      status: "healthy",
-      timestamp: new Date().toISOString(),
-      database: {
-        status: "connected",
-        fields_count: healthData.fields_count,
-        analyses_count: healthData.analyses_count,
-      },
-      services: {
-        sentinel_hub: {
-          status: process.env.SENTINEL_HUB_CLIENT_ID ? "configured" : "not_configured",
-          client_id: process.env.SENTINEL_HUB_CLIENT_ID ? "set" : "missing",
+      const healthData = result.rows[0]
+
+      return NextResponse.json({
+        status: "healthy",
+        timestamp: new Date().toISOString(),
+        database: {
+          status: "connected",
+          fields_count: healthData.fields_count,
+          analyses_count: healthData.analyses_count,
         },
-      },
-      environment: {
-        node_env: process.env.NODE_ENV,
-        app_url: process.env.APP_URL,
-      },
-    })
+        services: {
+          sentinel_hub: {
+            status: process.env.SENTINEL_HUB_CLIENT_ID ? "configured" : "not_configured",
+            client_id: process.env.SENTINEL_HUB_CLIENT_ID ? "set" : "missing",
+          },
+        },
+        environment: {
+          node_env: process.env.NODE_ENV,
+          app_url: process.env.APP_URL,
+        },
+      })
+    } finally {
+      client.release()
+    }
   } catch (error) {
     console.error("Health check failed:", error)
 
