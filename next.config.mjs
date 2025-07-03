@@ -14,9 +14,14 @@ const nextConfig = {
     unoptimized: true,
   },
   
-  // Environment variables
+  // Environment variables - provide defaults for build time
   env: {
-    CUSTOM_KEY: process.env.CUSTOM_KEY,
+    DATABASE_URL: process.env.DATABASE_URL || 'placeholder',
+    SENTINEL_HUB_CLIENT_ID: process.env.SENTINEL_HUB_CLIENT_ID || 'demo',
+    SENTINEL_HUB_CLIENT_SECRET: process.env.SENTINEL_HUB_CLIENT_SECRET || 'demo',
+    SENTINEL_HUB_INSTANCE_ID: process.env.SENTINEL_HUB_INSTANCE_ID || 'demo',
+    APP_URL: process.env.APP_URL || 'http://localhost:3000',
+    CUSTOM_KEY: process.env.CUSTOM_KEY || 'default',
   },
   
   // Headers for security
