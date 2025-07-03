@@ -1,0 +1,109 @@
+version: '3.8'
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15-alpine
+    container_name: agrisat-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: agrisat_db
+      POSTGRES_USER: agrisat_user
+      POSTGRES_PASSWORD: agrisat_secure_password_2024
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/init-db.sql:/docker-entrypoint-initdb.d/init-db.sql
+    ports:
+      - "5432:5432"
+    networks:
+      - agrisat-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agrisat_user -d agrisat_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis for caching (optional but recommended for production)
+  redis:
+    image: redis:7-alpine
+    container_name: agrisat-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - agrisat-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Next.js Application
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: agrisat-app
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      # Database Configuration
+      DATABASE_URL: postgresql://agrisat_user:agrisat_secure_password_2024@postgres:5432/agrisat_db
+      
+      # Sentinel Hub API Configuration
+      SENTINEL_HUB_CLIENT_ID: 3e7b8ab4-0c05-4ac2-96bd-0ca40bef9be1
+      SENTINEL_HUB_CLIENT_SECRET: ${SENTINEL_HUB_CLIENT_SECRET}
+      SENTINEL_HUB_INSTANCE_ID: ${SENTINEL_HUB_INSTANCE_ID:-demo}
+      
+      # Redis Configuration (optional)
+      REDIS_URL: redis://redis:6379
+      
+      # Next.js Configuration
+      NODE_ENV: production
+      NEXT_TELEMETRY_DISABLED: 1
+      
+      # Application Configuration
+      APP_URL: http://localhost:3000
+      
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - agrisat-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Nginx Reverse Proxy (optional for production)
+  nginx:
+    image: nginx:alpine
+    container_name: agrisat-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf
+      - ./nginx/ssl:/etc/nginx/ssl
+    depends_on:
+      - app
+    networks:
+      - agrisat-network
+
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+
+networks:
+  agrisat-network:
+    driver: bridge
